@@ -64,12 +64,12 @@ class Administration(models.Model):
     def __str__(self):
         return self.login or self.email_address or str(self.id)
 
-
 class Access(models.Model):
     class ModuleCode(models.TextChoices):
         ADMINISTRATION = "administration", "Panel administracyjny"
         ORDERS = "orders", "Zamówienia"
-        PRODUCTS = "products", "Produkty"
+        WORKERS = "workers", "Pracwonicy"
+        DEVICES = "devices", "Urądzenia"
         CUSTOMERS = "customers", "Klienci"
 
     class Level(models.IntegerChoices):
@@ -95,7 +95,6 @@ class Access(models.Model):
     def __str__(self):
         return f"{self.user.user_token} → {self.get_module_display()}: {self.get_level_display()}"
 
-
 class Authorization(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.OneToOneField(
@@ -103,6 +102,9 @@ class Authorization(models.Model):
         on_delete=models.CASCADE,
         related_name="authorization",
     )
+
+    initial_password_encrypted = models.BinaryField(null=True, blank=True)
+
     password_hash = models.CharField(max_length=256)
     password_history = models.JSONField(default=list, blank=True)
     user_attempts = models.IntegerField(default=0)
@@ -201,3 +203,17 @@ class EmailOTP(models.Model):
     def mark_used(self):
         self.used_at = timezone.now()
         self.save(update_fields=["used_at"])
+
+class Group(models.Model):
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
+    token = models.CharField(max_length=255, unique=True)
+    name = models.CharField(max_length=255)
+    country = models.CharField(max_length=4)
+    postal_code_regex = models.CharField(max_length=255)
+    phone_regex = models.CharField(max_length=255)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.name} ({self.country})"

@@ -10,7 +10,6 @@ from ..addons.authentication import generate_jwt, get_jwt_payload, decode_jwt
 from ..models import Administration, Authorization, EmailOTP, Access, UserIdentifier
 from ..addons.utils import create_email_otp, hash_otp, validate_password_policy
 
-
 PASSWORD_MAX_AGE_DAYS = int(config("PASSWORD_MAX_AGE_DAYS", default=45, cast=int))
 LOCK_ATTEMPTS = int(config("LOCK_ATTEMPTS", default=3, cast=int))
 LOCK_MINUTES = int(config("LOCK_MINUTES", default=15, cast=int))
@@ -27,6 +26,7 @@ def _mask_email(email: str) -> str:
 
 
 def _password_needs_change(admin: Administration, auth: Authorization) -> tuple[bool, str | None]:
+
     if admin.last_login_at is None:
         return True, "first_login"
     if timezone.now() - auth.updated_at >= timedelta(days=PASSWORD_MAX_AGE_DAYS):
@@ -48,16 +48,30 @@ def _verify_change_token(token: str) -> str | None:
         return None
 
 
+def _role_name(user: UserIdentifier) -> str:
+    return (getattr(getattr(user, "user_privilege", None), "name", "") or "").upper()
+
+
+def _is_allowed_role(user: UserIdentifier) -> bool:
+    return _role_name(user) in ("ADMIN", "MANAGER")
+
+
+def _clear_initial_password_if_present(user: UserIdentifier) -> None:
+    try:
+        auth = Authorization.objects.get(user=user)
+    except Authorization.DoesNotExist:
+        return
+    if getattr(auth, "initial_password_encrypted", None):
+        auth.initial_password_encrypted = None
+        auth.save(update_fields=["initial_password_encrypted", "updated_at"])
+
+
 class AuthorizationController:
     @with_json_body
-    def login_step1(self, request):
-        body = request.json
-        if missing := require_fields(body, ["username_or_email", "password"]):
-            return _err(f"Missing fields: {', '.join(missing)}")
-
+    @require_fields(["username_or_email", "password"])
+    def login_step1(self, request, body=None):
         username_or_email = body["username_or_email"].strip()
         password = body["password"]
-
         qs = Administration.objects.select_related("user")
         admin = (
             qs.filter(email_address__iexact=username_or_email).first()
@@ -71,6 +85,9 @@ class AuthorizationController:
         user = admin.user
         if user.user_status != user.Status.ACTIVE:
             return _err("Account disabled", 403)
+
+        if not _is_allowed_role(user):
+            return _err("Role not permitted to log in", 403)
 
         try:
             auth = Authorization.objects.get(user=user)
@@ -108,10 +125,8 @@ class AuthorizationController:
         )
 
     @with_json_body
-    def login_step2(self, request):
-        body = request.json
-        if missing := require_fields(body, ["challenge_id", "code"]):
-            return _err(f"Missing fields: {', '.join(missing)}")
+    @require_fields(["challenge_id", "code"])
+    def login_step2(self, request, body=None):
 
         challenge_id = body["challenge_id"]
         code = body["code"].strip()
@@ -130,14 +145,16 @@ class AuthorizationController:
             otp.attempts += 1
             otp.save(update_fields=["attempts"])
             return _err("Invalid code")
-
         otp.mark_used()
-
         user = otp.user
+        if not _is_allowed_role(user):
+            return _err("Role not permitted to log in", 403)
+
         admin = getattr(user, "administration_profile", None)
         if admin:
             admin.last_login_at = now
             admin.save(update_fields=["last_login_at"])
+        _clear_initial_password_if_present(user)
 
         modules = list(
             Access.objects.filter(user=user, level__gt=Access.Level.NO_ACCESS).values_list("module", flat=True)
@@ -171,11 +188,8 @@ class AuthorizationController:
         )
 
     @with_json_body
-    def force_password_change(self, request):
-        body = request.json
-        if missing := require_fields(body, ["change_token", "new_password", "new_password_confirm"]):
-            return _err(f"Missing fields: {', '.join(missing)}")
-
+    @require_fields(["change_token", "new_password", "new_password_confirm"])
+    def force_password_change(self, request, body=None):
         change_token = body["change_token"].strip()
         new_password = body["new_password"]
         new_password_confirm = body["new_password_confirm"]
@@ -196,7 +210,8 @@ class AuthorizationController:
             user = UserIdentifier.objects.get(user_token=user_token)
         except UserIdentifier.DoesNotExist:
             return _err("Account not found")
-
+        if not _is_allowed_role(user):
+            return _err("Role not permitted to log in", 403)
         try:
             auth = Authorization.objects.get(user=user)
         except Authorization.DoesNotExist:
@@ -206,7 +221,6 @@ class AuthorizationController:
             return _err("Password was used before")
 
         auth.set_password(new_password)
-
         try:
             _, otp = create_email_otp(
                 user=user,
@@ -227,15 +241,12 @@ class AuthorizationController:
         )
 
     @with_json_body
-    def password_change_start(self, request):
+    @require_fields(["old_password", "new_password", "new_password_confirm"])
+    def password_change_start(self, request, body=None):
         try:
             payload = get_jwt_payload(request)
         except (ValueError, PermissionError) as e:
             return _err(str(e), 401)
-
-        body = request.json
-        if missing := require_fields(body, ["old_password", "new_password", "new_password_confirm"]):
-            return _err(f"Missing fields: {', '.join(missing)}")
 
         old_password = body["old_password"]
         new_password = body["new_password"]
@@ -257,6 +268,8 @@ class AuthorizationController:
         except UserIdentifier.DoesNotExist:
             return _err("Invalid token user", 401)
 
+        if not _is_allowed_role(user):
+            return _err("Role not permitted", 403)
         try:
             auth = Authorization.objects.get(user=user)
         except Authorization.DoesNotExist:
@@ -288,15 +301,12 @@ class AuthorizationController:
         )
 
     @with_json_body
-    def password_change_confirm(self, request):
+    @require_fields(["challenge_id", "code", "new_password", "new_password_confirm"])
+    def password_change_confirm(self, request, body=None):
         try:
             payload = get_jwt_payload(request)
         except (ValueError, PermissionError) as e:
             return _err(str(e), 401)
-
-        body = request.json
-        if missing := require_fields(body, ["challenge_id", "code", "new_password", "new_password_confirm"]):
-            return _err(f"Missing fields: {', '.join(missing)}")
 
         challenge_id = body["challenge_id"]
         code = body["code"].strip()
@@ -316,6 +326,8 @@ class AuthorizationController:
         except UserIdentifier.DoesNotExist:
             return _err("Invalid token user", 401)
 
+        if not _is_allowed_role(user):
+            return _err("Role not permitted", 403)
         try:
             otp = EmailOTP.objects.select_related("user").get(
                 id=challenge_id, user=user, purpose=EmailOTP.Purpose.PASSWORD_CHANGE
@@ -333,7 +345,11 @@ class AuthorizationController:
             otp.save(update_fields=["attempts"])
             return _err("Invalid code")
 
-        auth = Authorization.objects.get(user=user)
+        try:
+            auth = Authorization.objects.get(user=user)
+        except Authorization.DoesNotExist:
+            return _err("Authorization record missing")
+
         if auth.password_used_before(new_password):
             return _err("Password was used before")
 

@@ -25,6 +25,8 @@ def _mask_email(email: str) -> str:
         domain_mask = ".".join(parts) if parts else "***"
     return f"{local_mask}@{domain_mask}"
 
+def _role_name(user: UserIdentifier) -> str:
+    return (getattr(getattr(user, "user_privilege", None), "name", "") or "").upper()
 
 def _issue_reset_token(user_token: str) -> str:
     return generate_jwt({"sub": user_token, "token_type": "pwd_reset"}, exp_hours=1)
@@ -64,7 +66,8 @@ class AdministrationResetPasswordController:
 
         generic_ok = {"detail": "If the account exists, instructions were sent."}
 
-        if not admin or not admin.is_active or admin.user.user_status != admin.user.Status.ACTIVE:
+        if not admin or not admin.is_active or admin.user.user_status != admin.user.Status.ACTIVE\
+                or _role_name(admin.user) not in ("ADMIN,MANAGER"):
             return _ok(generic_ok)
 
         reset_token = _issue_reset_token(admin.user.user_token)

@@ -1,18 +1,20 @@
 import re
-import jwt as pyjwt
+
 import random
 import string
-from datetime import datetime, timedelta, timezone
+
 from secrets import token_urlsafe
 
 from decouple import config
 from django.core.validators import EmailValidator
 from django.core.exceptions import ValidationError
-from django.utils.text import slugify
+
 from django.db.models import Model
 from .mailsender import send_otp_email
 import json
 from django.http import JsonResponse
+
+from typing import Iterable, Mapping, Tuple, List
 
 import logging
 logger = logging.getLogger(__name__)
@@ -142,6 +144,42 @@ def validate_password_policy(p: str, min_len: int = 8, max_len: int = 100) -> No
         raise ValueError("Hasło musi zawierać minimum 1 wielką literę.")
     if not re.search(r"[^\w\s]", p, flags=re.UNICODE):
         raise ValueError("Hasło musi zawierać minimum 1 znak specjalny.")
+
+
+def update_instance_fields(
+    instance,
+    values: Mapping[str, object],
+    allowed: Iterable[str] | None = None,
+    save: bool = True,
+    touch_updated_at: bool = True,
+) -> Tuple[bool, List[str]]:
+    allowed_set = set(allowed) if allowed is not None else None
+    to_set: dict[str, object] = {}
+
+    for field, new_val in values.items():
+        if allowed_set is not None and field not in allowed_set:
+            continue
+        if not hasattr(instance, field):
+            continue
+        if getattr(instance, field) != new_val:
+            to_set[field] = new_val
+
+    if not to_set:
+        return False, []
+
+    for field, new_val in to_set.items():
+        setattr(instance, field, new_val)
+
+    changed_fields = list(to_set.keys())
+
+    if touch_updated_at and hasattr(instance, "updated_at"):
+        if "updated_at" not in changed_fields:
+            changed_fields.append("updated_at")
+
+    if save:
+        instance.save(update_fields=changed_fields)
+
+    return True, changed_fields
 
 
 

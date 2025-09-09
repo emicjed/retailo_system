@@ -26,7 +26,6 @@ def generate_jwt(payload: dict, exp_hours: int | None = None) -> str:
     return token if isinstance(token, str) else token.decode("utf-8")
 
 def extract_bearer_token(request) -> str | None:
-    """Zwraca token z nagłówka Authorization (obsługuje 'Bearer <tok>' oraz sam token)."""
     auth = request.META.get("HTTP_AUTHORIZATION", "")
     parts = auth.split()
     if len(parts) == 2 and parts[0] == "Bearer":
